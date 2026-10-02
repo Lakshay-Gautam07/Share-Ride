@@ -28,10 +28,15 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
   const watchIdRef = useRef(null);
   const socketRef = useRef(null);
 
+  // Throttling refs
+  const lastSentTimeRef = useRef(0);
+  const lastSentCoordsRef = useRef(null);
+
   const [currentLocation, setCurrentLocation] = useState(ride.currentLocation);
   const [lastUpdated, setLastUpdated] = useState(new Date());
   const [locationError, setLocationError] = useState(null);
-  const [socketConnected, setSocketConnected] = useState(false);
+  const [gpsStatus, setGpsStatus] = useState('active'); // 'active' | 'searching' | 'denied'
+  const [connStatus, setConnStatus] = useState('connecting'); // 'connected' | 'connecting' | 'reconnecting' | 'disconnected'
   const [mapError, setMapError] = useState(null);
   const [copied, setCopied] = useState(false);
   const [endingRide, setEndingRide] = useState(false);
@@ -74,55 +79,92 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
     });
   }, [ride, onRideEnded]);
 
-  // Broadcast location update helper
-  const sendLocationUpdate = useCallback((newLoc) => {
+  // Throttled location update helper (at most once every 2s, or when moved > 8m)
+  const sendLocationUpdate = useCallback((newLoc, force = false) => {
+    const now = Date.now();
+    const timeSinceLast = now - lastSentTimeRef.current;
+
+    let distanceMoved = 0;
+    if (lastSentCoordsRef.current) {
+      distanceMoved = getDistanceMeters(
+        lastSentCoordsRef.current.lat,
+        lastSentCoordsRef.current.lng,
+        newLoc.lat,
+        newLoc.lng
+      );
+    }
+
+    // Always update local marker/state immediately
     setCurrentLocation(newLoc);
-    setLastUpdated(new Date());
+    setLastUpdated(new Date(now));
     setLocationError(null);
+    setGpsStatus('active');
 
     // Automatic arrival detection: within 75 meters of destination
     if (ride.destinationCoords && typeof ride.destinationCoords.lat === 'number') {
-      const distance = getDistanceMeters(
+      const distanceToDest = getDistanceMeters(
         newLoc.lat,
         newLoc.lng,
         ride.destinationCoords.lat,
         ride.destinationCoords.lng
       );
 
-      if (distance <= 75) {
-        console.log(`🎯 Passenger reached destination (${distance.toFixed(1)}m away). Auto-ending ride.`);
+      if (distanceToDest <= 75) {
+        console.log(`🎯 Passenger reached destination (${distanceToDest.toFixed(1)}m away). Auto-ending ride.`);
         handleEndRide('destination_reached');
         return;
       }
     }
+
+    // Throttle socket broadcasts: skip if < 2000ms AND moved < 8 meters (unless forced)
+    if (!force && timeSinceLast < 2000 && distanceMoved < 8 && lastSentCoordsRef.current !== null) {
+      return;
+    }
+
+    lastSentTimeRef.current = now;
+    lastSentCoordsRef.current = newLoc;
 
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('update-location', {
         token: ride.token,
         lat: newLoc.lat,
         lng: newLoc.lng,
+        timestamp: now,
       });
     }
   }, [ride.token, ride.destinationCoords, handleEndRide]);
 
-  // 1. Socket.IO connection & room subscription
+  // 1. Socket.IO connection with graceful disconnect/reconnect handling
   useEffect(() => {
     const socket = io(API_URL, {
       transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
     });
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      setSocketConnected(true);
+      setConnStatus('connected');
       socket.emit('join-ride', ride.token);
     });
 
     socket.on('disconnect', () => {
-      setSocketConnected(false);
+      setConnStatus('disconnected');
     });
 
     socket.on('connect_error', () => {
-      setSocketConnected(false);
+      setConnStatus('reconnecting');
+    });
+
+    socket.io.on('reconnect_attempt', () => {
+      setConnStatus('reconnecting');
+    });
+
+    socket.io.on('reconnect', () => {
+      setConnStatus('connected');
+      socket.emit('join-ride', ride.token);
     });
 
     socket.on('location-updated', (data) => {
@@ -141,7 +183,6 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
     });
 
     socket.on('ride-inactive', () => {
-      // If ride is inactive on server, clear watcher and end
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
         watchIdRef.current = null;
@@ -157,14 +198,15 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
     };
   }, [ride, onRideEnded]);
 
-  // 2. Geolocation continuous tracking with watchPosition()
+  // 2. Geolocation tracking with resilient GPS loss handling (does not end ride on GPS drop)
   useEffect(() => {
     if (!navigator.geolocation) {
       setLocationError('Geolocation is not supported by your browser.');
+      setGpsStatus('denied');
       return;
     }
 
-    // Ensure no previous watcher exists before starting
+    // Ensure only one watcher is active
     if (watchIdRef.current !== null) {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
@@ -179,24 +221,24 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
         sendLocationUpdate(newLoc);
       },
       (err) => {
-        let message = 'Unable to retrieve location.';
+        // Handle GPS loss gracefully — DO NOT end the ride!
         if (err.code === 1) {
-          message = 'Location permission was denied. Please allow location access to continue tracking.';
-        } else if (err.code === 2) {
-          message = 'GPS location is temporarily unavailable. Re-attempting...';
-        } else if (err.code === 3) {
-          message = 'GPS location request timed out. Retrying...';
+          // Permission denied
+          setGpsStatus('denied');
+          setLocationError('Location permission is disabled. Please re-enable location in your browser settings.');
+        } else if (err.code === 2 || err.code === 3) {
+          // Position unavailable or timeout
+          setGpsStatus('searching');
+          setLocationError('GPS signal is weak or temporarily unavailable. Searching for fix... Your live ride remains active.');
         }
-        setLocationError(message);
       },
       {
         enableHighAccuracy: true,
-        maximumAge: 3000,
-        timeout: 10000,
+        maximumAge: 4000,
+        timeout: 12000,
       }
     );
 
-    // Stop watchPosition on unmount or when leaving active ride screen
     return () => {
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current);
@@ -295,15 +337,12 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
   }, [currentLocation, autoPan]);
 
   // --- SHARE ACTIONS ---
-
-  // Action 1: Copy Link
   const handleCopy = () => {
     navigator.clipboard.writeText(shareUrl);
     setCopied(true);
     setTimeout(() => setCopied(false), 2500);
   };
 
-  // Action 2: Web Share API (native mobile/desktop share sheet)
   const handleWebShare = async () => {
     if (navigator.share) {
       try {
@@ -322,7 +361,6 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
     }
   };
 
-  // Action 3: WhatsApp fallback
   const handleWhatsAppShare = () => {
     const text = encodeURIComponent(
       `I'm sharing my temporary live ride to ${ride.destination}. Track me live: ${shareUrl}`
@@ -338,7 +376,7 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
       lat: Number((currentLocation.lat + deltaLat).toFixed(6)),
       lng: Number((currentLocation.lng + deltaLng).toFixed(6)),
     };
-    sendLocationUpdate(updated);
+    sendLocationUpdate(updated, true);
   };
 
   // Test GPS step directly to destination (tests arrival auto-ending)
@@ -347,32 +385,42 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
       sendLocationUpdate({
         lat: ride.destinationCoords.lat,
         lng: ride.destinationCoords.lng,
-      });
+      }, true);
     }
   };
+
+  const isConnected = connStatus === 'connected';
+  const isReconnecting = connStatus === 'reconnecting' || connStatus === 'disconnected';
 
   return (
     <div className="active-tracker">
       <div className="card active-card">
-        {/* Header with Live Status & Connection */}
+        {/* Header with Live Status & Connection Pill */}
         <div className="active-header">
           <div>
             <div className="live-status-badge">
-              <span className="live-pulse" />
-              <span>LIVE TRACKING ACTIVE</span>
+              <span className={`live-pulse ${gpsStatus === 'searching' ? 'pulse-amber' : ''}`} />
+              <span>{gpsStatus === 'searching' ? 'GPS SIGNAL WEAK — SEARCHING' : 'LIVE TRACKING ACTIVE'}</span>
             </div>
             <h1 className="active-title">Ongoing Ride</h1>
           </div>
-          <div className={`connection-pill ${socketConnected ? 'connected' : 'connecting'}`}>
+          <div className={`connection-pill ${isConnected ? 'connected' : 'connecting'}`}>
             <span className="conn-dot" />
-            {socketConnected ? 'Real-time Connected' : 'Reconnecting...'}
+            {isConnected ? 'Real-time Connected' : isReconnecting ? 'Reconnecting...' : 'Connecting...'}
           </div>
         </div>
 
-        {/* Location / Geolocation Error Alert */}
+        {/* Temporary GPS Loss Notice (Non-intrusive, ride preserved) */}
         {locationError && (
-          <div className="alert alert-warning">
+          <div className={`alert ${gpsStatus === 'searching' ? 'alert-warning' : 'alert-error'}`}>
             <span>⚠️ {locationError}</span>
+          </div>
+        )}
+
+        {/* Reconnecting Banner */}
+        {isReconnecting && (
+          <div className="alert alert-warning">
+            <span>📡 <strong>Reconnecting to real-time server...</strong> Location updates will sync automatically once re-established.</span>
           </div>
         )}
 

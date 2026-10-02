@@ -44,6 +44,10 @@ const rideSchema = new mongoose.Schema({
     type: String,
     enum: ['manual', 'destination_reached', 'cancelled'],
   },
+  lastLocationTimestamp: {
+    type: Number,
+    default: 0,
+  },
 }, {
   timestamps: true,
 });

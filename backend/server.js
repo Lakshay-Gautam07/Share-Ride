@@ -64,6 +64,25 @@ function getDistanceMeters(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+// Helper to validate token format
+function isValidToken(token) {
+  return typeof token === 'string' && /^[a-zA-Z0-9_-]{16,128}$/.test(token);
+}
+
+// Helper to validate coordinates
+function isValidCoord(lat, lng) {
+  return (
+    typeof lat === 'number' &&
+    typeof lng === 'number' &&
+    !isNaN(lat) &&
+    !isNaN(lng) &&
+    lat >= -90 &&
+    lat <= 90 &&
+    lng >= -180 &&
+    lng <= 180
+  );
+}
+
 // Arrival threshold: 75 meters
 const ARRIVAL_THRESHOLD_METERS = 75;
 
@@ -71,11 +90,36 @@ const ARRIVAL_THRESHOLD_METERS = 75;
 io.on('connection', (socket) => {
   console.log(`🔌 Socket connected: ${socket.id}`);
 
-  // Join a specific ride room
-  socket.on('join-ride', (token) => {
-    if (!token) return;
-    socket.join(token);
-    console.log(`📡 Socket ${socket.id} joined ride room: ${token}`);
+  // Join a specific ride room — validates token and ride existence
+  socket.on('join-ride', async (token) => {
+    try {
+      if (!isValidToken(token)) {
+        socket.emit('error-notice', { message: 'Invalid ride token format.' });
+        return;
+      }
+
+      // Check if ride exists in database
+      const ride = await Ride.findOne({ token }).select('status endedAt destination');
+      if (!ride) {
+        socket.emit('join-error', { token, message: 'Ride not found or link has expired.' });
+        return;
+      }
+
+      socket.join(token);
+      console.log(`📡 Socket ${socket.id} joined ride room: ${token}`);
+
+      // If ride is already ended, notify the joining viewer immediately
+      if (ride.status === 'ENDED' || ride.status === 'completed' || ride.status === 'cancelled') {
+        socket.emit('ride-ended', {
+          token,
+          status: 'ENDED',
+          endedAt: ride.endedAt ? ride.endedAt.toISOString() : new Date().toISOString(),
+          message: 'This ride has concluded.',
+        });
+      }
+    } catch (err) {
+      console.error('Error joining ride room:', err.message);
+    }
   });
 
   // Leave ride room
@@ -88,25 +132,34 @@ io.on('connection', (socket) => {
   // Handle passenger live location updates
   socket.on('update-location', async (data) => {
     try {
-      const { token, lat, lng } = data || {};
+      const { token, lat, lng, timestamp } = data || {};
 
-      if (!token || typeof lat !== 'number' || typeof lng !== 'number') {
+      if (!isValidToken(token) || !isValidCoord(lat, lng)) {
         return;
       }
 
-      // Check if ride exists and is still active (prevent ended/expired tokens from updating)
+      const clientTimestamp = typeof timestamp === 'number' && timestamp > 0 ? timestamp : Date.now();
+
+      // Check if ride exists and verify active status
       const ride = await Ride.findOne({ token });
       if (!ride) {
         socket.emit('ride-inactive', { token, message: 'Ride not found.' });
         return;
       }
 
+      // Ensure ended rides immediately stop accepting location updates
       if (ride.status === 'ENDED' || ride.status === 'completed' || ride.status === 'cancelled') {
         socket.emit('ride-inactive', {
           token,
-          status: ride.status,
-          message: 'This ride has already ended. Location updates are disabled.',
+          status: 'ENDED',
+          message: 'This ride has ended. Location updates are closed.',
         });
+        return;
+      }
+
+      // Prevent stale location updates from overwriting newer locations
+      if (ride.lastLocationTimestamp && clientTimestamp <= ride.lastLocationTimestamp) {
+        // Discard older out-of-order packet
         return;
       }
 
@@ -132,11 +185,13 @@ io.on('connection', (socket) => {
         ride.status = 'ENDED';
         ride.endedAt = endedAt;
         ride.endReason = 'destination_reached';
+        ride.lastLocationTimestamp = clientTimestamp;
         await ride.save();
 
         io.to(token).emit('location-updated', {
           lat,
           lng,
+          timestamp: clientTimestamp,
           updatedAt: endedAt.toISOString(),
         });
 
@@ -152,19 +207,20 @@ io.on('connection', (socket) => {
         return;
       }
 
-      // Standard active location update
+      // Update timestamp and coordinates
+      ride.currentLocation = { lat, lng };
+      ride.lastLocationTimestamp = clientTimestamp;
+      await ride.save();
+
+      // Broadcast fresh location to all clients tracking this ride
       const updatePayload = {
         lat,
         lng,
-        updatedAt: new Date().toISOString(),
+        timestamp: clientTimestamp,
+        updatedAt: new Date(clientTimestamp).toISOString(),
       };
 
-      // Broadcast new location to all clients tracking this ride
       io.to(token).emit('location-updated', updatePayload);
-
-      // Update current location in MongoDB (single field update, no historical logs)
-      ride.currentLocation = { lat, lng };
-      await ride.save();
     } catch (err) {
       console.error('❌ Error handling update-location:', err.message);
     }
@@ -176,7 +232,7 @@ io.on('connection', (socket) => {
       const token = typeof data === 'string' ? data : data?.token;
       const reason = data?.reason || 'manual';
 
-      if (!token) return;
+      if (!isValidToken(token)) return;
 
       const endedAt = new Date();
       await Ride.findOneAndUpdate(

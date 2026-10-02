@@ -1,8 +1,21 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import { loadGoogleMaps } from '../utils/loadGoogleMaps';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
+// Helper to format human-readable relative time
+function formatRelativeTime(date) {
+  if (!date) return 'Waiting for first update...';
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+
+  if (elapsedSeconds < 5) return 'Just now';
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s ago`;
+  const minutes = Math.floor(elapsedSeconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ago`;
+}
 
 export default function PublicRideViewer({ token, onGoHome }) {
   const [ride, setRide] = useState(null);
@@ -13,7 +26,8 @@ export default function PublicRideViewer({ token, onGoHome }) {
   const [endedAtTime, setEndedAtTime] = useState(null);
   const [endReason, setEndReason] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [socketConnected, setSocketConnected] = useState(false);
+  const [relativeTimeStr, setRelativeTimeStr] = useState('Just now');
+  const [connStatus, setConnStatus] = useState('connecting'); // 'connected' | 'connecting' | 'reconnecting' | 'disconnected'
   const [mapError, setMapError] = useState(null);
   const [autoPan, setAutoPan] = useState(true);
   const [routeInfo, setRouteInfo] = useState(null);
@@ -24,6 +38,22 @@ export default function PublicRideViewer({ token, onGoHome }) {
   const directionsServiceRef = useRef(null);
   const directionsRendererRef = useRef(null);
   const socketRef = useRef(null);
+
+  // Stale update prevention ref
+  const lastReceivedTimestampRef = useRef(0);
+
+  // Ticking timer for "Last updated X seconds ago"
+  useEffect(() => {
+    if (!lastUpdated) return;
+
+    setRelativeTimeStr(formatRelativeTime(lastUpdated));
+
+    const intervalId = setInterval(() => {
+      setRelativeTimeStr(formatRelativeTime(lastUpdated));
+    }, 3000);
+
+    return () => clearInterval(intervalId);
+  }, [lastUpdated]);
 
   // 1. Fetch public ride details by token
   useEffect(() => {
@@ -47,7 +77,10 @@ export default function PublicRideViewer({ token, onGoHome }) {
         setEndedAtTime(data.endedAt || null);
         setEndReason(data.endReason || null);
         setRouteInfo(data.route || null);
-        setLastUpdated(new Date(data.updatedAt || data.startedAt));
+
+        const initTime = new Date(data.updatedAt || data.startedAt);
+        setLastUpdated(initTime);
+        lastReceivedTimestampRef.current = data.lastLocationTimestamp || initTime.getTime();
         setLoading(false);
       })
       .catch((err) => {
@@ -61,33 +94,54 @@ export default function PublicRideViewer({ token, onGoHome }) {
     };
   }, [token]);
 
-  // 2. Connect to Socket.IO for real-time live location broadcasts if ride is active
+  // 2. Connect to Socket.IO with graceful disconnect/reconnect handling
   useEffect(() => {
-    if (!token || (rideStatus !== 'active')) return;
+    if (!token || rideStatus !== 'active') return;
 
     const socket = io(API_URL, {
       transports: ['websocket', 'polling'],
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
     });
     socketRef.current = socket;
 
     socket.on('connect', () => {
-      setSocketConnected(true);
+      setConnStatus('connected');
       socket.emit('join-ride', token);
     });
 
     socket.on('disconnect', () => {
-      setSocketConnected(false);
+      setConnStatus('disconnected');
     });
 
     socket.on('connect_error', () => {
-      setSocketConnected(false);
+      setConnStatus('reconnecting');
     });
 
-    // Handle real-time passenger location update
+    socket.io.on('reconnect_attempt', () => {
+      setConnStatus('reconnecting');
+    });
+
+    socket.io.on('reconnect', () => {
+      setConnStatus('connected');
+      socket.emit('join-ride', token);
+    });
+
+    // Handle real-time passenger location update (prevent stale packets)
     socket.on('location-updated', (data) => {
       if (data && typeof data.lat === 'number' && typeof data.lng === 'number') {
+        const updateTs = typeof data.timestamp === 'number' ? data.timestamp : Date.now();
+
+        // Discard stale out-of-order packets
+        if (updateTs < lastReceivedTimestampRef.current) {
+          return;
+        }
+
+        lastReceivedTimestampRef.current = updateTs;
         setCurrentLocation({ lat: data.lat, lng: data.lng });
-        setLastUpdated(new Date(data.updatedAt || Date.now()));
+        setLastUpdated(new Date(data.updatedAt || updateTs));
       }
     });
 
@@ -255,6 +309,14 @@ export default function PublicRideViewer({ token, onGoHome }) {
   }
 
   const isRideActive = rideStatus === 'active';
+  const isConnected = connStatus === 'connected';
+  const isReconnecting = connStatus === 'reconnecting' || connStatus === 'disconnected';
+
+  // Check if GPS updates are delayed (> 50 seconds while active)
+  const isGpsDelayed =
+    isRideActive &&
+    lastUpdated &&
+    Date.now() - lastUpdated.getTime() > 50000;
 
   // 3. Active or Ended Ride View
   return (
@@ -271,12 +333,26 @@ export default function PublicRideViewer({ token, onGoHome }) {
           </div>
 
           {isRideActive && (
-            <div className={`connection-pill ${socketConnected ? 'connected' : 'connecting'}`}>
+            <div className={`connection-pill ${isConnected ? 'connected' : 'connecting'}`}>
               <span className="conn-dot" />
-              {socketConnected ? 'Live' : 'Reconnecting...'}
+              {isConnected ? 'Live' : isReconnecting ? 'Reconnecting...' : 'Connecting...'}
             </div>
           )}
         </div>
+
+        {/* Reconnecting Alert Banner */}
+        {isRideActive && isReconnecting && (
+          <div className="alert alert-warning">
+            <span>📡 <strong>Reconnecting to live stream...</strong> We'll automatically catch up once connected.</span>
+          </div>
+        )}
+
+        {/* GPS Delayed Banner */}
+        {isGpsDelayed && (
+          <div className="alert alert-warning">
+            <span>🛰️ <strong>GPS Signal Paused:</strong> Passenger device is temporarily out of GPS range. Showing last confirmed location.</span>
+          </div>
+        )}
 
         {/* Ride Ended Alert Banner */}
         {!isRideActive && (
@@ -284,7 +360,7 @@ export default function PublicRideViewer({ token, onGoHome }) {
             <span>
               🏁 <strong>This ride has concluded.</strong>{' '}
               {endReason === 'destination_reached'
-                ? 'Passenger reached their destination.'
+                ? 'Passenger arrived at their destination.'
                 : 'Live location tracking has stopped.'}
               {endedAtTime && ` (Ended at ${new Date(endedAtTime).toLocaleTimeString()})`}
             </span>
@@ -314,19 +390,19 @@ export default function PublicRideViewer({ token, onGoHome }) {
           </div>
         )}
 
-        {/* Real-time Telemetry */}
-        {isRideActive && currentLocation && (
+        {/* Real-time Telemetry & Last Updated Live Time */}
+        {currentLocation && (
           <div className="telemetry-bar">
             <div className="telemetry-item">
-              <span className="telemetry-label">PASSENGER GPS</span>
+              <span className="telemetry-label">LAST UPDATED</span>
               <span className="telemetry-val">
-                {currentLocation.lat.toFixed(5)}, {currentLocation.lng.toFixed(5)}
+                {isRideActive ? relativeTimeStr : (lastUpdated ? lastUpdated.toLocaleTimeString() : 'Concluded')}
               </span>
             </div>
             <div className="telemetry-item">
-              <span className="telemetry-label">LAST UPDATE</span>
+              <span className="telemetry-label">CURRENT COORDINATES</span>
               <span className="telemetry-val">
-                {lastUpdated ? lastUpdated.toLocaleTimeString() : 'Just now'}
+                {currentLocation.lat.toFixed(5)}, {currentLocation.lng.toFixed(5)}
               </span>
             </div>
           </div>
