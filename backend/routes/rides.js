@@ -66,4 +66,29 @@ router.get('/:token', async (req, res) => {
   }
 });
 
+// PATCH /api/rides/:token/status — Update ride status (e.g. completed, cancelled)
+router.patch('/:token/status', async (req, res) => {
+  try {
+    const { status } = req.body;
+    if (!status || !['active', 'completed', 'cancelled'].includes(status)) {
+      return res.status(400).json({ error: 'Invalid or missing status' });
+    }
+
+    const ride = await Ride.findOneAndUpdate(
+      { token: req.params.token },
+      { status },
+      { new: true }
+    );
+
+    if (!ride) {
+      return res.status(404).json({ error: 'Ride not found' });
+    }
+
+    res.json(ride);
+  } catch (err) {
+    console.error('Error updating ride status:', err.message);
+    res.status(500).json({ error: 'Failed to update ride status' });
+  }
+});
+
 module.exports = router;

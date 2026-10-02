@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import MapWithSearch from './components/MapWithSearch';
+import ActiveRideTracker from './components/ActiveRideTracker';
 import './App.css';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
@@ -10,10 +11,10 @@ function App() {
   const [destination, setDestination] = useState(null);
   const [loading, setLoading] = useState(false);
   const [ride, setRide] = useState(null);
+  const [completedRide, setCompletedRide] = useState(null);
   const [error, setError] = useState(null);
-  const [copied, setCopied] = useState(false);
 
-  // 1. Get passenger's current location via browser Geolocation
+  // 1. Initial geolocation to center the passenger map
   useEffect(() => {
     if (!navigator.geolocation) {
       setLocationError('Geolocation is not supported by your browser.');
@@ -45,7 +46,7 @@ function App() {
     setLocationError(null);
   };
 
-  // 2. Start Ride flow: persists ride in MongoDB Atlas
+  // 2. Start Ride flow: persists ride in MongoDB Atlas & enters Active Ride Tracking
   const handleStartRide = async () => {
     if (!destination) {
       setError('Please search and select a destination first.');
@@ -87,65 +88,54 @@ function App() {
     }
   };
 
-  const handleCopyLink = (url) => {
-    navigator.clipboard.writeText(url);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
-  };
-
-  // 3. Ride created state: display ride details, route ETA, and secure share URL
+  // 3. Active Ride state: continuous live location tracking with watchPosition() & Socket.IO
   if (ride) {
-    const shareUrl = `${window.location.origin}/ride/${ride.token}`;
+    return (
+      <div className="app">
+        <ActiveRideTracker
+          ride={ride}
+          onRideEnded={() => {
+            setCompletedRide(ride);
+            setRide(null);
+          }}
+        />
+      </div>
+    );
+  }
 
+  // 4. Completed Ride summary state
+  if (completedRide) {
     return (
       <div className="app">
         <div className="card success-card">
-          <h1>🚗 Ride Started!</h1>
-          <p className="subtitle">Your temporary live ride is active and saved to MongoDB.</p>
+          <h1>🏁 Ride Completed!</h1>
+          <p className="subtitle">Live tracking has stopped and your ride is archived in MongoDB.</p>
 
           <div className="ride-info">
-            <p><strong>Destination:</strong> {ride.destination}</p>
-            <p><strong>Origin:</strong> {ride.origin}</p>
-            {ride.route?.distance && (
-              <p><strong>Est. Distance:</strong> {ride.route.distance}</p>
+            <p><strong>📍 Destination:</strong> {completedRide.destination}</p>
+            <p><strong>🏁 Origin:</strong> {completedRide.origin}</p>
+            {completedRide.route?.distance && (
+              <p><strong>🛣️ Distance:</strong> {completedRide.route.distance}</p>
             )}
-            {ride.route?.duration && (
-              <p><strong>Est. Duration (ETA):</strong> {ride.route.duration}</p>
-            )}
-            <p><strong>Status:</strong> <span className="badge">{ride.status}</span></p>
-            <p><strong>Started At:</strong> {new Date(ride.startedAt).toLocaleTimeString()}</p>
-          </div>
-
-          <div className="share-section">
-            <p className="share-label">Public Share Link (secure token):</p>
-            <div className="share-url">
-              <code>{shareUrl}</code>
-              <button
-                type="button"
-                className="btn btn-small"
-                onClick={() => handleCopyLink(shareUrl)}
-              >
-                {copied ? 'Copied! ✓' : 'Copy Link'}
-              </button>
-            </div>
+            <p><strong>Status:</strong> <span className="badge badge-completed">Completed</span></p>
           </div>
 
           <button
             type="button"
-            className="btn btn-secondary"
+            className="btn btn-primary"
             onClick={() => {
-              setRide(null);
+              setCompletedRide(null);
               setDestination(null);
             }}
           >
-            Create Another Ride
+            Start Another Ride
           </button>
         </div>
       </div>
     );
   }
 
-  // 4. Default passenger view: Map + Search + Start Ride
+  // 5. Default passenger view: Map + Search + Start Ride
   return (
     <div className="app">
       <div className="card">

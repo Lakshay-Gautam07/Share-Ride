@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
+const Ride = require('./models/Ride');
 
 const app = express();
 const server = http.createServer(app);
@@ -11,7 +12,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
     origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    methods: ['GET', 'POST'],
+    methods: ['GET', 'POST', 'PATCH'],
   },
 });
 
@@ -48,9 +49,73 @@ app.get('/api/health', (_req, res) => {
 const ridesRouter = require('./routes/rides');
 app.use('/api/rides', ridesRouter);
 
-// Socket.IO
+// Socket.IO real-time tracking
 io.on('connection', (socket) => {
   console.log(`🔌 Socket connected: ${socket.id}`);
+
+  // Join a specific ride room
+  socket.on('join-ride', (token) => {
+    if (!token) return;
+    socket.join(token);
+    console.log(`📡 Socket ${socket.id} joined ride room: ${token}`);
+  });
+
+  // Leave ride room
+  socket.on('leave-ride', (token) => {
+    if (!token) return;
+    socket.leave(token);
+    console.log(`📡 Socket ${socket.id} left ride room: ${token}`);
+  });
+
+  // Handle passenger live location updates
+  socket.on('update-location', async (data) => {
+    try {
+      const { token, lat, lng } = data || {};
+
+      if (!token || typeof lat !== 'number' || typeof lng !== 'number') {
+        return;
+      }
+
+      const updatePayload = {
+        lat,
+        lng,
+        updatedAt: new Date().toISOString(),
+      };
+
+      // Broadcast new location to all clients tracking this ride
+      io.to(token).emit('location-updated', updatePayload);
+
+      // Update current location in MongoDB (single document field update, no historical logs)
+      await Ride.findOneAndUpdate(
+        { token, status: 'active' },
+        { currentLocation: { lat, lng } }
+      );
+    } catch (err) {
+      console.error('❌ Error handling update-location:', err.message);
+    }
+  });
+
+  // Handle ending a ride
+  socket.on('end-ride', async ({ token }) => {
+    try {
+      if (!token) return;
+
+      const ride = await Ride.findOneAndUpdate(
+        { token },
+        { status: 'completed' },
+        { new: true }
+      );
+
+      io.to(token).emit('ride-ended', {
+        token,
+        status: 'completed',
+        completedAt: new Date().toISOString(),
+      });
+      console.log(`🏁 Ride completed: ${token}`);
+    } catch (err) {
+      console.error('❌ Error ending ride:', err.message);
+    }
+  });
 
   socket.on('disconnect', () => {
     console.log(`🔌 Socket disconnected: ${socket.id}`);
