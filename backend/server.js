@@ -44,6 +44,10 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+// Routes
+const ridesRouter = require('./routes/rides');
+app.use('/api/rides', ridesRouter);
+
 // Socket.IO
 io.on('connection', (socket) => {
   console.log(`🔌 Socket connected: ${socket.id}`);
