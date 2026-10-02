@@ -1,11 +1,20 @@
 import { useEffect, useState, useCallback } from 'react';
 import MapWithSearch from './components/MapWithSearch';
 import ActiveRideTracker from './components/ActiveRideTracker';
+import PublicRideViewer from './components/PublicRideViewer';
 import './App.css';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
+// Helper to extract public ride token from path /view/:token or /ride/:token
+const getRouteToken = () => {
+  const path = window.location.pathname;
+  const match = path.match(/^\/(?:view|ride)\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
+};
+
 function App() {
+  const [viewToken, setViewToken] = useState(() => getRouteToken());
   const [userLocation, setUserLocation] = useState(null);
   const [locationError, setLocationError] = useState(null);
   const [destination, setDestination] = useState(null);
@@ -14,8 +23,25 @@ function App() {
   const [completedRide, setCompletedRide] = useState(null);
   const [error, setError] = useState(null);
 
-  // 1. Initial geolocation to center the passenger map
+  // Sync route token when user navigates using back/forward buttons
   useEffect(() => {
+    const handlePopState = () => {
+      setViewToken(getRouteToken());
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const handleGoHome = useCallback(() => {
+    window.history.pushState({}, '', '/');
+    setViewToken(null);
+  }, []);
+
+  // 1. Initial geolocation to center passenger map
+  useEffect(() => {
+    // Only request passenger location if in create ride mode
+    if (viewToken) return;
+
     if (!navigator.geolocation) {
       setLocationError('Geolocation is not supported by your browser.');
       return;
@@ -34,7 +60,7 @@ function App() {
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
-  }, []);
+  }, [viewToken]);
 
   const handleDestinationSelect = useCallback((dest) => {
     setDestination(dest);
@@ -88,7 +114,14 @@ function App() {
     }
   };
 
-  // 3. Active Ride state: continuous live location tracking with watchPosition() & Socket.IO
+  // --- ROUTING / SCREEN RESOLUTION ---
+
+  // Screen 1: Public Ride Viewer (/view/:token or /ride/:token)
+  if (viewToken) {
+    return <PublicRideViewer token={viewToken} onGoHome={handleGoHome} />;
+  }
+
+  // Screen 2: Active Ride Tracking (Passenger view)
   if (ride) {
     return (
       <div className="app">
@@ -103,7 +136,7 @@ function App() {
     );
   }
 
-  // 4. Completed Ride summary state
+  // Screen 3: Completed Ride Summary
   if (completedRide) {
     return (
       <div className="app">
@@ -135,7 +168,7 @@ function App() {
     );
   }
 
-  // 5. Default passenger view: Map + Search + Start Ride
+  // Screen 4: Passenger Ride Setup & Creation
   return (
     <div className="app">
       <div className="card">

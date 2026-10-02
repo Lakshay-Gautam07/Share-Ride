@@ -22,7 +22,7 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
   const [endingRide, setEndingRide] = useState(false);
   const [autoPan, setAutoPan] = useState(true);
 
-  const shareUrl = `${window.location.origin}/ride/${ride.token}`;
+  const shareUrl = `${window.location.origin}/view/${ride.token}`;
 
   // Broadcast location update helper
   const sendLocationUpdate = useCallback((newLoc) => {

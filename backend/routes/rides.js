@@ -55,11 +55,21 @@ router.post('/', async (req, res) => {
 // GET /api/rides/:token — Get ride by public token
 router.get('/:token', async (req, res) => {
   try {
-    const ride = await Ride.findOne({ token: req.params.token });
+    const ride = await Ride.findOne({ token: req.params.token }).select('-_id -__v');
     if (!ride) {
-      return res.status(404).json({ error: 'Ride not found' });
+      return res.status(404).json({ error: 'Ride not found or link has expired' });
     }
-    res.json(ride);
+    res.json({
+      token: ride.token,
+      status: ride.status,
+      origin: ride.origin,
+      destination: ride.destination,
+      destinationCoords: ride.destinationCoords,
+      currentLocation: ride.currentLocation,
+      route: ride.route,
+      startedAt: ride.startedAt,
+      updatedAt: ride.updatedAt,
+    });
   } catch (err) {
     console.error('Error fetching ride:', err.message);
     res.status(500).json({ error: 'Failed to fetch ride' });
@@ -78,13 +88,23 @@ router.patch('/:token/status', async (req, res) => {
       { token: req.params.token },
       { status },
       { new: true }
-    );
+    ).select('-_id -__v');
 
     if (!ride) {
       return res.status(404).json({ error: 'Ride not found' });
     }
 
-    res.json(ride);
+    res.json({
+      token: ride.token,
+      status: ride.status,
+      origin: ride.origin,
+      destination: ride.destination,
+      destinationCoords: ride.destinationCoords,
+      currentLocation: ride.currentLocation,
+      route: ride.route,
+      startedAt: ride.startedAt,
+      updatedAt: ride.updatedAt,
+    });
   } catch (err) {
     console.error('Error updating ride status:', err.message);
     res.status(500).json({ error: 'Failed to update ride status' });
