@@ -9,7 +9,7 @@ const rideSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['active', 'completed', 'cancelled'],
+    enum: ['active', 'completed', 'cancelled', 'ENDED'],
     default: 'active',
   },
   origin: {
@@ -36,6 +36,13 @@ const rideSchema = new mongoose.Schema({
   startedAt: {
     type: Date,
     default: Date.now,
+  },
+  endedAt: {
+    type: Date,
+  },
+  endReason: {
+    type: String,
+    enum: ['manual', 'destination_reached', 'cancelled'],
   },
 }, {
   timestamps: true,

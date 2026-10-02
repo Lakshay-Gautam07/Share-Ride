@@ -4,6 +4,21 @@ import { loadGoogleMaps } from '../utils/loadGoogleMaps';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
 
+// Haversine distance in meters
+function getDistanceMeters(lat1, lon1, lat2, lon2) {
+  const R = 6371e3; // Earth radius in meters
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
 export default function ActiveRideTracker({ ride, onRideEnded }) {
   const mapRef = useRef(null);
   const mapInstanceRef = useRef(null);
@@ -24,11 +39,62 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
 
   const shareUrl = `${window.location.origin}/view/${ride.token}`;
 
+  // End ride handler: stops watch, updates DB to ENDED, notifies socket room
+  const handleEndRide = useCallback(async (reason = 'manual') => {
+    setEndingRide(true);
+
+    // 1. Immediately stop watchPosition to prevent further location updates
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
+    }
+
+    // 2. Emit socket event to notify all viewers
+    if (socketRef.current && socketRef.current.connected) {
+      socketRef.current.emit('end-ride', { token: ride.token, reason });
+    }
+
+    // 3. Persist ENDED status in MongoDB
+    try {
+      await fetch(`${API_URL}/api/rides/${ride.token}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'ENDED', reason }),
+      });
+    } catch (err) {
+      console.error('Failed to update ride status in DB:', err);
+    }
+
+    setEndingRide(false);
+    onRideEnded({
+      ...ride,
+      status: 'ENDED',
+      endedAt: new Date().toISOString(),
+      endReason: reason,
+    });
+  }, [ride, onRideEnded]);
+
   // Broadcast location update helper
   const sendLocationUpdate = useCallback((newLoc) => {
     setCurrentLocation(newLoc);
     setLastUpdated(new Date());
     setLocationError(null);
+
+    // Automatic arrival detection: within 75 meters of destination
+    if (ride.destinationCoords && typeof ride.destinationCoords.lat === 'number') {
+      const distance = getDistanceMeters(
+        newLoc.lat,
+        newLoc.lng,
+        ride.destinationCoords.lat,
+        ride.destinationCoords.lng
+      );
+
+      if (distance <= 75) {
+        console.log(`🎯 Passenger reached destination (${distance.toFixed(1)}m away). Auto-ending ride.`);
+        handleEndRide('destination_reached');
+        return;
+      }
+    }
 
     if (socketRef.current && socketRef.current.connected) {
       socketRef.current.emit('update-location', {
@@ -37,7 +103,7 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
         lng: newLoc.lng,
       });
     }
-  }, [ride.token]);
+  }, [ride.token, ride.destinationCoords, handleEndRide]);
 
   // 1. Socket.IO connection & room subscription
   useEffect(() => {
@@ -65,8 +131,22 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
       }
     });
 
-    socket.on('ride-ended', () => {
-      onRideEnded();
+    socket.on('ride-ended', (data) => {
+      onRideEnded({
+        ...ride,
+        status: 'ENDED',
+        endedAt: data?.endedAt || new Date().toISOString(),
+        endReason: data?.reason || 'manual',
+      });
+    });
+
+    socket.on('ride-inactive', () => {
+      // If ride is inactive on server, clear watcher and end
+      if (watchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+        watchIdRef.current = null;
+      }
+      onRideEnded({ ...ride, status: 'ENDED' });
     });
 
     return () => {
@@ -75,13 +155,19 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
         socket.disconnect();
       }
     };
-  }, [ride.token, onRideEnded]);
+  }, [ride, onRideEnded]);
 
   // 2. Geolocation continuous tracking with watchPosition()
   useEffect(() => {
     if (!navigator.geolocation) {
       setLocationError('Geolocation is not supported by your browser.');
       return;
+    }
+
+    // Ensure no previous watcher exists before starting
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearWatch(watchIdRef.current);
+      watchIdRef.current = null;
     }
 
     watchIdRef.current = navigator.geolocation.watchPosition(
@@ -208,34 +294,40 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
     }
   }, [currentLocation, autoPan]);
 
-  // End ride handler: stops watch, updates DB and notifies socket room
-  const handleEndRide = async () => {
-    setEndingRide(true);
+  // --- SHARE ACTIONS ---
 
-    // Stop watchPosition immediately
-    if (watchIdRef.current !== null) {
-      navigator.geolocation.clearWatch(watchIdRef.current);
-      watchIdRef.current = null;
+  // Action 1: Copy Link
+  const handleCopy = () => {
+    navigator.clipboard.writeText(shareUrl);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2500);
+  };
+
+  // Action 2: Web Share API (native mobile/desktop share sheet)
+  const handleWebShare = async () => {
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: 'Track my live ride on Share Ride',
+          text: `I'm on my way to ${ride.destination}. Follow my live ride here:`,
+          url: shareUrl,
+        });
+      } catch (err) {
+        if (err.name !== 'AbortError') {
+          handleCopy();
+        }
+      }
+    } else {
+      handleCopy();
     }
+  };
 
-    // Emit socket event to notify all viewers
-    if (socketRef.current && socketRef.current.connected) {
-      socketRef.current.emit('end-ride', { token: ride.token });
-    }
-
-    // Persist completed status in MongoDB
-    try {
-      await fetch(`${API_URL}/api/rides/${ride.token}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: 'completed' }),
-      });
-    } catch (err) {
-      console.error('Failed to update ride status in DB:', err);
-    }
-
-    setEndingRide(false);
-    onRideEnded();
+  // Action 3: WhatsApp fallback
+  const handleWhatsAppShare = () => {
+    const text = encodeURIComponent(
+      `I'm sharing my temporary live ride to ${ride.destination}. Track me live: ${shareUrl}`
+    );
+    window.open(`https://api.whatsapp.com/send?text=${text}`, '_blank', 'noopener,noreferrer');
   };
 
   // Test GPS movement simulation helper
@@ -249,10 +341,14 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
     sendLocationUpdate(updated);
   };
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(shareUrl);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2500);
+  // Test GPS step directly to destination (tests arrival auto-ending)
+  const handleSimulateArrival = () => {
+    if (ride.destinationCoords) {
+      sendLocationUpdate({
+        lat: ride.destinationCoords.lat,
+        lng: ride.destinationCoords.lng,
+      });
+    }
   };
 
   return (
@@ -302,14 +398,24 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
               >
                 📍 {autoPan ? 'Center Locked' : 'Recenter'}
               </button>
-              <button
-                type="button"
-                className="map-ctrl-btn test-btn"
-                onClick={handleSimulateMovement}
-                title="Send a simulated GPS update"
-              >
-                🚀 Test GPS Step
-              </button>
+              <div className="sim-btns">
+                <button
+                  type="button"
+                  className="map-ctrl-btn test-btn"
+                  onClick={handleSimulateMovement}
+                  title="Simulate a small GPS step"
+                >
+                  🚀 Step GPS
+                </button>
+                <button
+                  type="button"
+                  className="map-ctrl-btn test-btn"
+                  onClick={handleSimulateArrival}
+                  title="Simulate reaching destination (triggers auto-end)"
+                >
+                  🎯 Test Arrival
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -342,29 +448,48 @@ export default function ActiveRideTracker({ ride, onRideEnded }) {
           )}
         </div>
 
-        {/* Public Share Link */}
+        {/* Share Section with Copy, Web Share, WhatsApp */}
         <div className="share-section">
           <p className="share-label">Share private tracking link with contacts:</p>
-          <div className="share-url">
+          <div className="share-url-box">
             <code>{shareUrl}</code>
+          </div>
+          <div className="share-actions-row">
             <button
               type="button"
-              className="btn btn-small"
+              className="btn btn-share btn-copy"
               onClick={handleCopy}
+              title="Copy link to clipboard"
             >
-              {copied ? 'Copied! ✓' : 'Copy Link'}
+              {copied ? 'Copied! ✓' : '📋 Copy Link'}
+            </button>
+            <button
+              type="button"
+              className="btn btn-share btn-webshare"
+              onClick={handleWebShare}
+              title="Share using native share menu"
+            >
+              📲 Share Ride
+            </button>
+            <button
+              type="button"
+              className="btn btn-share btn-whatsapp"
+              onClick={handleWhatsAppShare}
+              title="Share via WhatsApp"
+            >
+              💬 WhatsApp
             </button>
           </div>
         </div>
 
-        {/* End Ride Button */}
+        {/* Prominent Stop Sharing / End Ride Button */}
         <button
           type="button"
-          className="btn btn-danger"
-          onClick={handleEndRide}
+          className="btn btn-danger btn-end-ride"
+          onClick={() => handleEndRide('manual')}
           disabled={endingRide}
         >
-          {endingRide ? 'Ending Ride...' : '🏁 End Ride'}
+          {endingRide ? 'Ending Ride...' : '🛑 Stop Sharing / End Ride'}
         </button>
       </div>
     </div>

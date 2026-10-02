@@ -37,10 +37,36 @@ function App() {
     setViewToken(null);
   }, []);
 
-  // 1. Initial geolocation to center passenger map
+  // Restore ongoing active ride after browser refresh/reconnect without creating duplicates
   useEffect(() => {
-    // Only request passenger location if in create ride mode
     if (viewToken) return;
+
+    const savedToken = localStorage.getItem('active_ride_token');
+    if (!savedToken) return;
+
+    fetch(`${API_URL}/api/rides/${savedToken}`)
+      .then((res) => {
+        if (!res.ok) throw new Error('Ride not found');
+        return res.json();
+      })
+      .then((data) => {
+        if (data.status === 'active') {
+          setRide(data);
+        } else {
+          localStorage.removeItem('active_ride_token');
+          if (data.status === 'ENDED' || data.status === 'completed') {
+            setCompletedRide(data);
+          }
+        }
+      })
+      .catch(() => {
+        localStorage.removeItem('active_ride_token');
+      });
+  }, [viewToken]);
+
+  // Initial geolocation to center passenger map (only when creating a ride)
+  useEffect(() => {
+    if (viewToken || ride) return;
 
     if (!navigator.geolocation) {
       setLocationError('Geolocation is not supported by your browser.');
@@ -60,7 +86,7 @@ function App() {
       },
       { enableHighAccuracy: true, timeout: 10000 }
     );
-  }, [viewToken]);
+  }, [viewToken, ride]);
 
   const handleDestinationSelect = useCallback((dest) => {
     setDestination(dest);
@@ -72,7 +98,7 @@ function App() {
     setLocationError(null);
   };
 
-  // 2. Start Ride flow: persists ride in MongoDB Atlas & enters Active Ride Tracking
+  // Start Ride flow: persists ride in MongoDB Atlas & enters Active Ride Tracking
   const handleStartRide = async () => {
     if (!destination) {
       setError('Please search and select a destination first.');
@@ -106,12 +132,19 @@ function App() {
       }
 
       const data = await res.json();
+      localStorage.setItem('active_ride_token', data.token);
       setRide(data);
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleRideEnded = (endedRide) => {
+    localStorage.removeItem('active_ride_token');
+    setCompletedRide(endedRide || ride);
+    setRide(null);
   };
 
   // --- ROUTING / SCREEN RESOLUTION ---
@@ -127,10 +160,7 @@ function App() {
       <div className="app">
         <ActiveRideTracker
           ride={ride}
-          onRideEnded={() => {
-            setCompletedRide(ride);
-            setRide(null);
-          }}
+          onRideEnded={handleRideEnded}
         />
       </div>
     );
@@ -141,8 +171,12 @@ function App() {
     return (
       <div className="app">
         <div className="card success-card">
-          <h1>🏁 Ride Completed!</h1>
-          <p className="subtitle">Live tracking has stopped and your ride is archived in MongoDB.</p>
+          <h1>🏁 Ride Ended</h1>
+          <p className="subtitle">
+            {completedRide.endReason === 'destination_reached'
+              ? '🎯 You have arrived at your destination!'
+              : 'Live tracking has stopped and sharing is closed.'}
+          </p>
 
           <div className="ride-info">
             <p><strong>📍 Destination:</strong> {completedRide.destination}</p>
@@ -150,7 +184,10 @@ function App() {
             {completedRide.route?.distance && (
               <p><strong>🛣️ Distance:</strong> {completedRide.route.distance}</p>
             )}
-            <p><strong>Status:</strong> <span className="badge badge-completed">Completed</span></p>
+            <p><strong>Status:</strong> <span className="badge badge-completed">ENDED</span></p>
+            {completedRide.endedAt && (
+              <p><strong>Ended At:</strong> {new Date(completedRide.endedAt).toLocaleTimeString()}</p>
+            )}
           </div>
 
           <button

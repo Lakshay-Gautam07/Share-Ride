@@ -483,6 +483,86 @@ body {
   color: #374151;
 }
 
+.share-url-box {
+  margin-bottom: 0.65rem;
+}
+
+.share-url-box code {
+  display: block;
+  width: 100%;
+  background: #fff;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  word-break: break-all;
+  color: #374151;
+}
+
+.share-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.btn-share {
+  flex: 1;
+  min-width: 90px;
+  padding: 0.45rem 0.65rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.btn-copy {
+  background: #2563eb;
+  color: #ffffff;
+}
+
+.btn-copy:hover {
+  background: #1d4ed8;
+}
+
+.btn-webshare {
+  background: #f8fafc;
+  color: #334155;
+  border-color: #cbd5e1;
+}
+
+.btn-webshare:hover {
+  background: #f1f5f9;
+}
+
+.btn-whatsapp {
+  background: #25d366;
+  color: #ffffff;
+}
+
+.btn-whatsapp:hover {
+  background: #1ebc59;
+}
+
+.btn-end-ride {
+  padding: 0.85rem 1rem;
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin-top: 0.5rem;
+}
+
+.sim-btns {
+  display: flex;
+  gap: 0.35rem;
+}
+
 /* Public Ride Viewer */
 .viewer-container {
   width: 100%;

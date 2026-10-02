@@ -68,6 +68,8 @@ router.get('/:token', async (req, res) => {
       currentLocation: ride.currentLocation,
       route: ride.route,
       startedAt: ride.startedAt,
+      endedAt: ride.endedAt,
+      endReason: ride.endReason,
       updatedAt: ride.updatedAt,
     });
   } catch (err) {
@@ -76,17 +78,24 @@ router.get('/:token', async (req, res) => {
   }
 });
 
-// PATCH /api/rides/:token/status — Update ride status (e.g. completed, cancelled)
+// PATCH /api/rides/:token/status — Update ride status (e.g. ENDED, completed, cancelled)
 router.patch('/:token/status', async (req, res) => {
   try {
-    const { status } = req.body;
-    if (!status || !['active', 'completed', 'cancelled'].includes(status)) {
+    const { status, reason } = req.body;
+    const allowed = ['active', 'completed', 'cancelled', 'ENDED'];
+    if (!status || !allowed.includes(status)) {
       return res.status(400).json({ error: 'Invalid or missing status' });
+    }
+
+    const updateFields = { status };
+    if (status === 'ENDED' || status === 'completed') {
+      updateFields.endedAt = new Date();
+      if (reason) updateFields.endReason = reason;
     }
 
     const ride = await Ride.findOneAndUpdate(
       { token: req.params.token },
-      { status },
+      updateFields,
       { new: true }
     ).select('-_id -__v');
 
@@ -103,6 +112,8 @@ router.patch('/:token/status', async (req, res) => {
       currentLocation: ride.currentLocation,
       route: ride.route,
       startedAt: ride.startedAt,
+      endedAt: ride.endedAt,
+      endReason: ride.endReason,
       updatedAt: ride.updatedAt,
     });
   } catch (err) {

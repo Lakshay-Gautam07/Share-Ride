@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { io } from 'socket.io-client';
 import { loadGoogleMaps } from '../utils/loadGoogleMaps';
 
@@ -10,6 +10,8 @@ export default function PublicRideViewer({ token, onGoHome }) {
   const [error, setError] = useState(null);
   const [currentLocation, setCurrentLocation] = useState(null);
   const [rideStatus, setRideStatus] = useState('active');
+  const [endedAtTime, setEndedAtTime] = useState(null);
+  const [endReason, setEndReason] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [socketConnected, setSocketConnected] = useState(false);
   const [mapError, setMapError] = useState(null);
@@ -42,6 +44,8 @@ export default function PublicRideViewer({ token, onGoHome }) {
         setRide(data);
         setCurrentLocation(data.currentLocation);
         setRideStatus(data.status);
+        setEndedAtTime(data.endedAt || null);
+        setEndReason(data.endReason || null);
         setRouteInfo(data.route || null);
         setLastUpdated(new Date(data.updatedAt || data.startedAt));
         setLoading(false);
@@ -59,7 +63,7 @@ export default function PublicRideViewer({ token, onGoHome }) {
 
   // 2. Connect to Socket.IO for real-time live location broadcasts if ride is active
   useEffect(() => {
-    if (!token || rideStatus !== 'active') return;
+    if (!token || (rideStatus !== 'active')) return;
 
     const socket = io(API_URL, {
       transports: ['websocket', 'polling'],
@@ -89,9 +93,24 @@ export default function PublicRideViewer({ token, onGoHome }) {
 
     // Handle ride completion / end
     socket.on('ride-ended', (data) => {
-      setRideStatus('completed');
+      setRideStatus('ENDED');
+      if (data?.endedAt) {
+        setEndedAtTime(data.endedAt);
+      }
+      if (data?.reason) {
+        setEndReason(data.reason);
+      }
       if (socket) {
         socket.emit('leave-ride', token);
+        socket.disconnect();
+      }
+    });
+
+    socket.on('ride-inactive', () => {
+      setRideStatus('ENDED');
+      if (socket) {
+        socket.emit('leave-ride', token);
+        socket.disconnect();
       }
     });
 
@@ -262,7 +281,13 @@ export default function PublicRideViewer({ token, onGoHome }) {
         {/* Ride Ended Alert Banner */}
         {!isRideActive && (
           <div className="alert alert-info">
-            <span>🏁 <strong>This ride has concluded.</strong> Live location tracking has stopped.</span>
+            <span>
+              🏁 <strong>This ride has concluded.</strong>{' '}
+              {endReason === 'destination_reached'
+                ? 'Passenger reached their destination.'
+                : 'Live location tracking has stopped.'}
+              {endedAtTime && ` (Ended at ${new Date(endedAtTime).toLocaleTimeString()})`}
+            </span>
           </div>
         )}
 
@@ -318,6 +343,9 @@ export default function PublicRideViewer({ token, onGoHome }) {
             <p><strong>⏱️ Est. Travel Time (ETA):</strong> {routeInfo.duration}</p>
           )}
           <p><strong>Started:</strong> {new Date(ride.startedAt).toLocaleString()}</p>
+          {endedAtTime && (
+            <p><strong>Ended:</strong> {new Date(endedAtTime).toLocaleString()}</p>
+          )}
         </div>
 
         {/* Footer Navigation */}
